@@ -1,3 +1,4 @@
+################################ SETTINGS #####################################
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import sys
@@ -6,6 +7,7 @@ import pretty_print
 from statistics import mean
 from math import floor
 
+################################## GLOBALS ####################################
 SCHEDULE = {
     "Week 1": [],
     "Week 2": ["The Greasy Pineapples", "We Don't Give a Split"],
@@ -18,7 +20,7 @@ SCHEDULE = {
 
 TEAMS = ["The Bowling Mambas", "The Greasy Pineapples", "We Don't Give a Split"]
 
-MEN = [
+MEN = {
     'Dan Gillet',
     'Michael Sanfilippo',
     'Randy Meyer',
@@ -28,9 +30,9 @@ MEN = [
     'Andrew Manuele',
     'Brian Levine',
     'Michael Contento',
-]
+}
 
-WOMEN = [
+WOMEN = {
     'Katie Wiederhold',
     'Olivia Kerr',
     'Kamila Mikos',
@@ -38,18 +40,19 @@ WOMEN = [
     'Alex Avila',
     'Rachel Rubin',
     'Elizabeth Manuele',
-]
+}
 
 HEAD_2_HEAD_BONUS = 25
 BEST_MALE_BOWLER_BONUS = 25
 BEST_FEMALE_BOWLER_BONUS = 25
-BEST_TEAM_BONUS = 25
+BEST_SCORE_BONUS = 25
 
-BASIS_SCORE = 150
+BASIS_SCORE = 200
 PERCENTAGE_FACTOR = .9
 
-USE_HANDICAP = False
+USE_HANDICAP = True
 
+################################## MAIN #######################################
 def main():
     """
     get data from google sheet
@@ -62,8 +65,8 @@ def main():
         -best female bowler name and score
         -total pins on season
     """
-    weekly_data = {}
-    data = get_data()
+    season_data = {}
+    data, sheet = get_data()
     handicaps = calculate_handicap(data)
     
     for game in data:
@@ -75,12 +78,12 @@ def main():
                 USE_HANDICAP else game["Frame 10"]
     
     for week in SCHEDULE:
-        weekly_data[week] = {}
+        season_data[week] = {}
         for team in TEAMS:
             ordered_scores = get_ordered_scores(data, week, team)
             best_bowler_data = get_best_bowler_data(data, week, team)
             
-            weekly_data[week][team] = {
+            season_data[week][team] = {
                 "best_score": ordered_scores[0],
                 "second_best": ordered_scores[1],
                 "best_male_bowler": best_bowler_data["male_name"],
@@ -88,12 +91,25 @@ def main():
                 "best_female_bowler": best_bowler_data["female_name"],
                 "best_female_score": best_bowler_data["female_score"],
             }
-        weekly_data[week]["h2h_bonus"] = get_h2h_bonus(
-          weekly_data[week],
+        season_data[week]["h2h_bonus"] = get_h2h_bonus(
+          season_data[week],
           SCHEDULE[week]
         )
     
-    pstop(weekly_data)
+    #calculate total pins on season
+    for week_data in season_data.values():
+      week_data = get_this_weeks_total_pins(week_data)
+    
+    #calc cumulative pins per week
+    for team in TEAMS:
+      cumulative_pins = 0
+      for week_data in season_data.values():
+        cumulative_pins += week_data[team]["current_total_pins"]
+        week_data[team]["cumulative_pins"] = cumulative_pins
+        
+    pstop(season_data)
+    update_google(season_data, sheet)
+    
     
     
 ############################# FUNCTIONS IN MAIN ###############################
@@ -113,7 +129,7 @@ def get_data():
     sheet = client.open('Bowling Data').worksheet("Season 1 Data")
     
     bowling_data = sheet.get_all_records()
-    return bowling_data
+    return bowling_data, sheet
     
 
 def calculate_handicap(data):
@@ -126,7 +142,7 @@ def calculate_handicap(data):
     """
     handicaps = {}
     
-    players = MEN + WOMEN
+    players = MEN.union(WOMEN)
     for player in players:
         average = floor(
             mean(
@@ -167,7 +183,7 @@ def get_h2h_bonus(week_data, matchup):
   team won the head to head bonus for that week
   """
   if not matchup:
-    return None
+    return []
   
   if week_data[matchup[0]]["best_score"] > week_data[matchup[1]]["best_score"]:
     return [matchup[0]]
@@ -184,9 +200,100 @@ def get_best_bowler_data(data, week, team):
   takes in the data universe, the week and team. Returns the best male and 
   female bowler names and scores for that week
   """
+  best_bowler_stats = {
+    "male_name": None,
+    "male_score": 0,
+    "female_name": None,
+    "female_score": 0,
+  }
+    
+  num_of_games = len(set(x["Game"] for x in data if x["Date"] == week and \
+      x["Team"] == team))
   
-    
-    
+  for i in range(1, num_of_games+1):
+    scores = []
+    for game in data:
+      if game["Date"] == week:
+        if game["Team"] == team:
+          if game["Game"] == i and game["adjusted_score"] != "-":
+            if game["Player"] in WOMEN:
+              if game["adjusted_score"] > best_bowler_stats["female_score"]:
+                best_bowler_stats["female_name"] = game["Player"]
+                best_bowler_stats["female_score"] = game["adjusted_score"]
+            else:
+              if game["adjusted_score"] > best_bowler_stats["male_score"]:
+                best_bowler_stats["male_name"] = game["Player"]
+                best_bowler_stats["male_score"] = game["adjusted_score"]
+  return best_bowler_stats
+
+
+def get_this_weeks_total_pins(week_data):
+  """
+  takes in all data up to this point and calculates the total pins for the
+  current week
+  -get bonuses
+    -best score bonus
+    -h2h bonus
+    -best male bowler bonus
+    -best female bowler bonus
+  """
+  
+  h2h_bonus = week_data.pop("h2h_bonus")
+  best_scores = []
+  best_male_bowlers = []
+  best_female_bowlers = []
+  
+  #first get the best scores for the bonus categories
+  for team_name, data in week_data.items():
+    best_scores.append((team_name, data["best_score"]))
+    best_male_bowlers.append((team_name, data["best_male_score"]))
+    best_female_bowlers.append((team_name, data["best_female_score"]))
+
+  best_score_team, best_score_value = max(best_scores, key = lambda x:x[1])
+  best_male_team, best_male_value = max(best_male_bowlers, key = lambda x:x[1])
+  best_female_team, best_female_value = max(best_female_bowlers, key = lambda x:x[1])
+
+  #then calculate the total pins for the week
+  for team_name, data in week_data.items():
+    data["current_total_pins"] = calc_pins(
+      team_name,
+      data["best_score"],
+      data["second_best"],
+      best_score_team,
+      best_male_team,
+      best_female_team,
+      h2h_bonus
+    )
+  
+  return week_data
+
+
+def calc_pins(
+  team_name, 
+  best_score, 
+  second_best, 
+  best_score_team, 
+  best_male_team,
+  best_female_team,
+  h2h_bonus
+):
+  
+  total_pins = (
+    best_score + 
+    second_best + 
+    (BEST_SCORE_BONUS if best_score_team == team_name else 0) +
+    (BEST_MALE_BOWLER_BONUS if best_male_team == team_name else 0) +
+    (BEST_FEMALE_BOWLER_BONUS if best_female_team == team_name else 0) +
+    (HEAD_2_HEAD_BONUS if team_name in h2h_bonus else 0)
+  )
+  return total_pins
+
+
+def update_google(season_data, sheet):
+  """
+  updates the google sheet with the proper data
+  """
+  pass
 ################################# UTILITIES ###################################
 
 def pstop(msg):
